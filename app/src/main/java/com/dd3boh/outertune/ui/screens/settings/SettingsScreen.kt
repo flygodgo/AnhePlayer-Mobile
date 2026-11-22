@@ -80,6 +80,12 @@ fun SettingsScreen(
                 onClick = { navController.navigate("settings/lx_source") }
             )
             PreferenceEntry(
+                title = { Text("洛雪云同步") },
+                description = "通过 lx-server 同步喜欢的歌曲与歌单",
+                icon = { Icon(Icons.Rounded.SdCard, null) },
+                onClick = { navController.navigate("settings/lx_sync") }
+            )
+            PreferenceEntry(
                 title = { Text("酷狗账号") },
                 description = "概念版登录、每日自动领取 VIP",
                 icon = { Icon(Icons.Rounded.MusicNote, null) },
