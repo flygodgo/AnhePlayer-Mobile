@@ -162,6 +162,17 @@ fun LxSyncSettings(
             Text("上次同步：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(java.util.Date(it))}",
                 style = MaterialTheme.typography.bodySmall)
         }
+        Spacer(Modifier.height(12.dp))
+        if (status.diag.isNotBlank()) {
+            Text("诊断日志（同步过程）：", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = status.diag,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(24.dp))
     }
 }
