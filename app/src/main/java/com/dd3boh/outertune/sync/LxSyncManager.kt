@@ -118,15 +118,10 @@ class LxSyncManager @Inject constructor(
     }
 
     private fun loadAuthKeys(): MutableMap<String, LxClientKeyInfo> {
-        val json = prefs.getString(KEY_AUTH_KEYS, null) ?: return mutableMapOf()
+        val raw = prefs.getString(KEY_AUTH_KEYS, null) ?: return mutableMapOf()
         return try {
-            val map = mutableMapOf<String, LxClientKeyInfo>()
-            val obj = lxJson.parseToJsonElement(json) as kotlinx.serialization.json.JsonObject
-            obj.entries.forEach { (k, v) ->
-                map[k] = lxJson.decodeFromJsonElement<LxClientKeyInfo>(v)
-            }
-            map
-        } catch {
+            lxJson.decodeFromString<MutableMap<String, LxClientKeyInfo>>(raw)
+        } catch (_: Exception) {
             mutableMapOf()
         }
     }
@@ -134,10 +129,7 @@ class LxSyncManager @Inject constructor(
     private fun saveAuthKey(id: String, info: LxClientKeyInfo) {
         val map = loadAuthKeys()
         map[id] = info
-        val obj = kotlinx.serialization.json.buildJsonObject {
-            map.forEach { (k, v) -> put(k, lxJson.encodeToJsonElement(v)) }
-        }
-        prefs.edit().putString(KEY_AUTH_KEYS, obj.toString()).apply()
+        prefs.edit().putString(KEY_AUTH_KEYS, lxJson.encodeToString(map)).apply()
     }
 
     // ─── 握手 ───
