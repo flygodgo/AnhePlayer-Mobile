@@ -110,21 +110,17 @@ fun LxSyncSettings(
         )
         Spacer(Modifier.height(12.dp))
 
-        ExposedDropdownMenuBox(
-            expanded = modeExpanded,
-            onExpandedChange = { modeExpanded = it },
-        ) {
-            OutlinedTextField(
-                value = mode.label,
-                onValueChange = {},
-                readOnly = true,
-                label = { Text("同步模式") },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modeExpanded) },
+        androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = { modeExpanded = true },
                 modifier = Modifier.fillMaxWidth(),
-            )
-            ExposedDropdownMenu(
+            ) {
+                Text("同步模式：${mode.label}")
+            }
+            androidx.compose.material3.DropdownMenu(
                 expanded = modeExpanded,
                 onDismissRequest = { modeExpanded = false },
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 LxSyncMode.entries.forEach { m ->
                     DropdownMenuItem(
