@@ -41,7 +41,7 @@ internal class Msg2Call(
         val deferred = CompletableDeferred<String>()
         pending[name] = deferred
         val payload = buildJsonObject {
-            put("name", name)
+            put("name", JsonPrimitive(name))
             put("path", buildJsonArray { path.forEach { add(JsonPrimitive(it)) } })
             put("data", buildJsonArray { data.forEach { add(parseOrString(it)) } })
         }
@@ -70,7 +70,7 @@ internal class Msg2Call(
             if (fn == null) {
                 sendMessage(
                     buildJsonObject {
-                        put("name", name)
+                        put("name", JsonPrimitive(name))
                         put("error", JsonPrimitive("$method is not defined"))
                     }.toString(),
                 )
@@ -80,7 +80,7 @@ internal class Msg2Call(
                 val result = fn(args)
                 sendMessage(
                     buildJsonObject {
-                        put("name", name)
+                        put("name", JsonPrimitive(name))
                         put("error", JsonNull)
                         put("data", parseOrString(result))
                     }.toString(),
@@ -88,7 +88,7 @@ internal class Msg2Call(
             } catch (e: Exception) {
                 sendMessage(
                     buildJsonObject {
-                        put("name", name)
+                        put("name", JsonPrimitive(name))
                         put("error", JsonPrimitive(e.message ?: e.toString()))
                     }.toString(),
                 )
