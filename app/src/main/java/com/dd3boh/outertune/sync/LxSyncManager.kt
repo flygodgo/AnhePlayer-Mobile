@@ -191,7 +191,9 @@ class LxSyncManager @Inject constructor(
         val key = LxSyncProtocol.deriveAuthKey(code)
         val rsa = LxSyncProtocol.generateRsaKeyPair()
         val pubB64 = LxSyncProtocol.exportSpkiBase64(rsa)
-        val identity = "$AUTH_MSG\n$pubB64\n$DEVICE_NAME\nlx_music_desktop"
+        // 对齐官方 lx-music-mobile：第 4 段必须是 lx_music_mobile，
+        // 服务端 auth.ts 用 data[3] == 'lx_music_mobile' 识别移动端（isMobile）
+        val identity = "$AUTH_MSG\n$pubB64\n$DEVICE_NAME\nlx_music_mobile"
         val msg = LxSyncProtocol.aesEncrypt(identity, key)
         val (text, status) = httpGet("${u.httpBase}/ah", mapOf("m" to msg))
         if (text == BLOCKED_IP || text == AUTH_FAILED || status != 200) {
@@ -229,15 +231,32 @@ class LxSyncManager @Inject constructor(
 
     private fun buildFuncs(): Map<String, suspend (List<JsonElement>) -> JsonElement> = mapOf(
         "getEnabledFeatures" to { args ->
-            diag("→ getEnabledFeatures(server=${arg(args.getOrNull(1))}, feats=${arg(args.getOrNull(2))})")
-            // 关键修复：skipSnapshot=true 让服务端跳过「快照+MD5 判定最新」的快路径。
-            // 该路径会用 clientId 的历史快照比对客户端 MD5，若相等（如空列表）就直接 finished，
-            // 不调用 get_list_data / set_list_data —— 表现为「已连接但歌单为空」。
-            // 设为 true 强制服务端走完整 handleSyncList：发现服务端有歌单、客户端为空则下发。
-            diag("→ 返回 skipSnapshot=true（强制全量同步，绕开快照跳过）")
-            lxJson.parseToJsonElement(
-                """{"list":{"skipSnapshot":true},"dislike":{"skipSnapshot":true}}""",
-            )
+            val serverType = arg(args.getOrNull(1))
+            val featsRaw = arg(args.getOrNull(2))
+            diag("→ getEnabledFeatures(server=$serverType, feats=$featsRaw)")
+
+            // 完全对齐官方 lx-music-mobile 的 sync/handler.ts：
+            // 只有当 featureVersion 与服务端 supportedFeatures 相等才启用对应模块，
+            // 且 skipSnapshot 固定为 false（官方手机端就是通过这条路正常同步的）。
+            // 之前设 true 是想绕开快照快路径，但那偏离了官方协议，且并未解决同步问题。
+            val supportedList = featsRaw?.let { runCatching { lxJson.parseToJsonElement(it).jsonObject["list"]?.toString()?.trim('"')?.toIntOrNull() }.getOrNull() }
+            val supportedDislike = featsRaw?.let { runCatching { lxJson.parseToJsonElement(it).jsonObject["dislike"]?.toString()?.trim('"')?.toIntOrNull() }.getOrNull() }
+
+            val sb = StringBuilder("{")
+            var first = true
+            fun appendModule(name: String, localVer: Int, remoteVer: Int?) {
+                if (localVer == remoteVer) {
+                    if (!first) sb.append(',')
+                    sb.append("\"$name\":{\"skipSnapshot\":false}")
+                    first = false
+                }
+            }
+            appendModule("list", FEATURE_VERSION_LIST, supportedList)
+            appendModule("dislike", FEATURE_VERSION_DISLIKE, supportedDislike)
+            sb.append('}')
+            val result = sb.toString()
+            diag("→ 返回 features=$result")
+            lxJson.parseToJsonElement(result)
         },
         "finished" to {
             val count = dataBridge.countSongs()
@@ -455,7 +474,9 @@ class LxSyncManager @Inject constructor(
             return
         }
         disconnect()
-        connect(url, getAuthCode().ifBlank { null }.takeIf { isEnabled() }, getMode())
+        // 对齐官方手机端：手动同步总是用授权码走 codeAuth 换取全新 clientId。
+        // 新 clientId 在服务端没有历史快照，才会触发完整歌单下发（而非快照快路径跳过）。
+        connect(url, getAuthCode().ifBlank { null }, getMode())
     }
 
     fun autoConnect() {
