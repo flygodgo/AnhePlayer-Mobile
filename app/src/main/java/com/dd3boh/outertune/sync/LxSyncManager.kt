@@ -239,8 +239,9 @@ class LxSyncManager @Inject constructor(
             // 只有当 featureVersion 与服务端 supportedFeatures 相等才启用对应模块，
             // 且 skipSnapshot 固定为 false（官方手机端就是通过这条路正常同步的）。
             // 之前设 true 是想绕开快照快路径，但那偏离了官方协议，且并未解决同步问题。
-            val supportedList = featsRaw?.let { runCatching { lxJson.parseToJsonElement(it).jsonObject["list"]?.toString()?.trim('"')?.toIntOrNull() }.getOrNull() }
-            val supportedDislike = featsRaw?.let { runCatching { lxJson.parseToJsonElement(it).jsonObject["dislike"]?.toString()?.trim('"')?.toIntOrNull() }.getOrNull() }
+            val featsObj = featsRaw?.let { runCatching { lxJson.parseToJsonElement(it) as? JsonObject }.getOrNull() }
+            val supportedList = featsObj?.get("list")?.toString()?.trim('"')?.toIntOrNull()
+            val supportedDislike = featsObj?.get("dislike")?.toString()?.trim('"')?.toIntOrNull()
 
             val sb = StringBuilder("{")
             var first = true
