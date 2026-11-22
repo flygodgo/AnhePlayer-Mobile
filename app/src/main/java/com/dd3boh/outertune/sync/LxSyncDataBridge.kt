@@ -62,26 +62,28 @@ class LxSyncDataBridge @Inject constructor(
         LxListData(defaultList = emptyList(), loveList = loveList, userList = userList)
     }
 
-    /** 把服务端 ListData 写回 Room（overwrite 语义，事务内完成） */
+    /** 把服务端 ListData 写回 Room（overwrite 语义） */
     suspend fun setLocalListData(data: LxListData): Unit = withContext(Dispatchers.IO) {
+        // Room 的 transaction lambda 是非 suspend 的，Flow 读取必须先在外面完成
+        val currentlyLiked = database.likedSongsByCreateDateAsc().first()
+            .map { it.song.copy(liked = false, likedDate = null) }
+        val existingPlaylistIds = data.userList.map { list ->
+            list.id to database.playlist(list.id).first()
+        }
+
         database.transaction {
             // 1. loveList：先把现有 liked 清空，再标记新的
-            val currentlyLiked = database.likedSongsByCreateDateAsc().first()
-                .map { it.song.copy(liked = false, likedDate = null) }
             currentlyLiked.forEach { database.update(it) }
-
             data.loveList.forEach { lx ->
-                upsertLxSong(lx) { entity ->
-                    entity.copy(
-                        liked = true,
-                        likedDate = entity.likedDate ?: LocalDateTime.now(),
-                    )
+                val metadata = lx.toMediaMetadata()
+                database.insert(metadata) { entity ->
+                    entity.copy(liked = true, likedDate = LocalDateTime.now())
                 }
             }
 
             // 2. userList：重建歌单歌曲映射
             for (remoteList in data.userList) {
-                val existing = database.playlist(remoteList.id).first()
+                val existing = existingPlaylistIds.firstOrNull { it.first == remoteList.id }?.second
                 val playlistId = if (existing == null) {
                     val newId = PlaylistEntity.generatePlaylistId()
                     database.insert(
@@ -99,29 +101,18 @@ class LxSyncDataBridge @Inject constructor(
 
                 database.clearPlaylist(playlistId)
                 remoteList.list.forEachIndexed { index, lx ->
-                    val entity = upsertLxSong(lx) { it }
-                    if (entity != null) {
-                        database.insert(
-                            com.dd3boh.outertune.db.entities.PlaylistSongMap(
-                                playlistId = playlistId,
-                                songId = entity.id,
-                                position = index,
-                            ),
-                        )
-                    }
+                    val metadata = lx.toMediaMetadata()
+                    database.insert(metadata) { it }
+                    database.insert(
+                        com.dd3boh.outertune.db.entities.PlaylistSongMap(
+                            playlistId = playlistId,
+                            songId = metadata.id,
+                            position = index,
+                        ),
+                    )
                 }
             }
         }
-    }
-
-    /** 单曲入库（含歌手/专辑关联），返回入库后的实体 */
-    private suspend fun upsertLxSong(
-        lx: LxMusicInfo,
-        block: (SongEntity) -> SongEntity,
-    ): SongEntity? {
-        val metadata = lx.toMediaMetadata()
-        database.insert(metadata, block)
-        return database.song(metadata.id).first()
     }
 
     /** 统计本地歌曲总数 */
