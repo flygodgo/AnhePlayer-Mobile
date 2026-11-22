@@ -230,9 +230,13 @@ class LxSyncManager @Inject constructor(
     private fun buildFuncs(): Map<String, suspend (List<JsonElement>) -> JsonElement> = mapOf(
         "getEnabledFeatures" to { args ->
             diag("→ getEnabledFeatures(server=${arg(args.getOrNull(1))}, feats=${arg(args.getOrNull(2))})")
-            // 对齐 lx：仅当版本一致才启用对应模块（我们用固定版本，向下兼容任意 serverType）
+            // 关键修复：skipSnapshot=true 让服务端跳过「快照+MD5 判定最新」的快路径。
+            // 该路径会用 clientId 的历史快照比对客户端 MD5，若相等（如空列表）就直接 finished，
+            // 不调用 get_list_data / set_list_data —— 表现为「已连接但歌单为空」。
+            // 设为 true 强制服务端走完整 handleSyncList：发现服务端有歌单、客户端为空则下发。
+            diag("→ 返回 skipSnapshot=true（强制全量同步，绕开快照跳过）")
             lxJson.parseToJsonElement(
-                """{"list":{"skipSnapshot":false},"dislike":{"skipSnapshot":false}}""",
+                """{"list":{"skipSnapshot":true},"dislike":{"skipSnapshot":true}}""",
             )
         },
         "finished" to {
