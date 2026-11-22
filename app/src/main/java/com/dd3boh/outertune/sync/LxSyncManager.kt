@@ -235,12 +235,12 @@ class LxSyncManager @Inject constructor(
             JsonPrimitive(LxSyncProtocol.md5(lxJson.encodeToString(dataBridge.getLocalListData())))
         },
         "list_sync_get_sync_mode" to { JsonPrimitive(currentMode.wire) },
-        "list_sync_get_list_data" to { lxJson.encodeToJsonElement(dataBridge.getLocalListData()) },
+        "list_sync_get_list_data" to { lxJson.parseToJsonElement(lxJson.encodeToString(dataBridge.getLocalListData())) },
         "list_sync_set_list_data" to { args ->
             val dataEl = args.getOrNull(1)
             if (dataEl != null && dataEl !is JsonNull) {
                 try {
-                    val data = lxJson.decodeFromJsonElement<LxListData>(dataEl)
+                    val data = lxJson.decodeFromString<LxListData>(dataEl.toString())
                     dataBridge.setLocalListData(data)
                     val count = dataBridge.countSongs()
                     updateStatus(message = "已接收云端歌单", syncedCount = count)
@@ -260,9 +260,9 @@ class LxSyncManager @Inject constructor(
             val raw = args.getOrNull(1)
             if (moduleReady["list"] == true && raw != null && raw !is JsonNull) {
                 try {
-                    val action = lxJson.decodeFromJsonElement<LxListAction>(raw)
+                    val action = lxJson.decodeFromString<LxListAction>(raw.toString())
                     if (action.action == "list_data_overwrite" && action.data != null) {
-                        val data = lxJson.decodeFromJsonElement<LxListData>(action.data!!)
+                        val data = lxJson.decodeFromString<LxListData>(action.data!!.toString())
                         dataBridge.setLocalListData(data)
                         updateStatus(message = "已接收云端歌单", syncedCount = dataBridge.countSongs())
                     }
@@ -289,7 +289,7 @@ class LxSyncManager @Inject constructor(
             val raw = args.getOrNull(1)
             if (raw != null && raw !is JsonNull) {
                 runCatching {
-                    val action = lxJson.decodeFromJsonElement<LxListAction>(raw)
+                    val action = lxJson.decodeFromString<LxListAction>(raw.toString())
                     if (action.action == "dislike_data_overwrite" && action.data != null) {
                         setDislikeRules(arg(action.data) ?: "")
                     }
