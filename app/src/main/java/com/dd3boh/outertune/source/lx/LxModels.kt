@@ -1,31 +1,65 @@
 package com.dd3boh.outertune.source.lx
 
 import com.dd3boh.outertune.models.MediaMetadata
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+
+/**
+ * 宽松 String 反序列化：lx-server 下发的 songId / albumId 等字段可能是 number，
+ * 而本地模型统一用 String。直接 decodeString 会抛异常导致整个 ListData 解析失败。
+ */
+object LooseStringSerializer : KSerializer<String> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("LooseString", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: String) = encoder.encodeString(value)
+
+    override fun deserialize(decoder: Decoder): String = try {
+        when (val element = decoder.decodeSerializableValue(JsonElement.serializer())) {
+            is JsonPrimitive -> element.content
+            else -> element.toString()
+        }
+    } catch (e: SerializationException) {
+        ""
+    } catch (e: Exception) {
+        ""
+    }
+}
 
 @Serializable
 data class LxSourceItem(
-    val id: String,
-    val name: String,
-    val script: String,
+    val id: String = "",
+    val name: String = "",
+    val script: String = "",
     val version: String? = null,
     val url: String? = null,
     val addedAt: Long = System.currentTimeMillis(),
 )
 
+/**
+ * 歌曲模型。所有字段都给默认值 + ignoreUnknownKeys，
+ * 保证 lx-server 下发的任意结构都能反序列化（缺 songmid 是常态）。
+ */
 @Serializable
 data class LxMusicInfo(
-    val id: String,
-    val songmid: String,
-    val name: String,
-    val singer: String,
-    val source: String,
+    val id: String = "",
+    val songmid: String = "",
+    val name: String = "",
+    val singer: String = "",
+    val source: String = "",
     val interval: String? = null,
-    val meta: LxMusicMeta,
+    val meta: LxMusicMeta = LxMusicMeta(),
     val hash: String? = null,
     val mid: String? = null,
     val musicId: String? = null,
@@ -35,8 +69,10 @@ data class LxMusicInfo(
 
 @Serializable
 data class LxMusicMeta(
-    val songId: String,
+    @Serializable(with = LooseStringSerializer::class)
+    val songId: String = "",
     val albumName: String = "",
+    @Serializable(with = LooseStringSerializer::class)
     val albumId: String? = null,
     val picUrl: String? = null,
     val qualitys: List<LxQuality> = emptyList(),
@@ -45,7 +81,7 @@ data class LxMusicMeta(
 
 @Serializable
 data class LxQuality(
-    val type: String,
+    val type: String = "",
     val size: String? = null,
 )
 
@@ -74,7 +110,7 @@ internal fun JsonObject.toScriptMusicInfo(): JsonObject {
 }
 
 fun LxMusicInfo.toMediaMetadata() = MediaMetadata(
-    id = id,
+    id = id.ifBlank { "${source}_${meta.songId}" },
     title = name,
     artists = listOf(MediaMetadata.Artist(id = null, name = singer)),
     duration = interval.toDurationSeconds(),
