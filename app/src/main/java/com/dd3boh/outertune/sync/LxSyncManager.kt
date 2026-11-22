@@ -10,6 +10,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -29,6 +33,7 @@ data class LxSyncStatus(
     val serverName: String? = null,
     val serverId: String? = null,
     val lastSyncAt: Long? = null,
+    val syncedCount: Int = 0,
 )
 
 /** 同步模式（对齐 lx 的 6 种 + cancel） */
@@ -51,7 +56,6 @@ data class LxSyncResult(val success: Boolean, val message: String = "", val song
 
 /**
  * lx-server v4 同步管理器（Android 版）。
- * 协议实现逐行对齐桌面版 AnhePlayer 的 lxSyncStore.ts（已通过编译验证）。
  * - HTTP 握手：/hello -> /id -> /ah
  * - WebSocket：/socket?i=clientId&t=aes(msgConnect,key)
  * - message2call RPC + gzip 载荷
@@ -63,16 +67,19 @@ class LxSyncManager @Inject constructor(
 ) {
     companion object {
         private const val PREFS = "lx_sync_prefs"
-        private const val KEY_AUTH_KEYS = "auth_keys"        // serverId -> clientKeyInfo JSON
+        private const val KEY_AUTH_KEYS = "auth_keys"
         private const val DEVICE_NAME = "AnhePlayer"
 
-        // 握手常量（与 SYNC_CODE 对齐）
         private const val HELLO_MSG = "Hello~::^-^::~v4~"
         private const val ID_PREFIX = "OjppZDo6"
         private const val AUTH_MSG = "lx-music auth::"
         private const val MSG_CONNECT = "lx-music connect"
         private const val AUTH_FAILED = "Auth failed"
         private const val BLOCKED_IP = "Blocked IP"
+
+        // 与 lx-music-desktop featureVersion 一致
+        private const val FEATURE_VERSION_LIST = 1
+        private const val FEATURE_VERSION_DISLIKE = 1
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -88,7 +95,7 @@ class LxSyncManager @Inject constructor(
 
     private val socketClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // WS 长连接
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
     private val _status = MutableStateFlow(LxSyncStatus())
@@ -166,7 +173,6 @@ class LxSyncManager @Inject constructor(
         return if (text.startsWith(ID_PREFIX)) text.removePrefix(ID_PREFIX) else ""
     }
 
-    /** 授权码授权：生成 RSA 密钥对，AES 加密身份串，RSA 解密服务端返回的 key */
     private fun codeAuth(u: UrlInfo, sid: String, code: String): LxClientKeyInfo {
         val key = LxSyncProtocol.deriveAuthKey(code)
         val rsa = LxSyncProtocol.generateRsaKeyPair()
@@ -183,7 +189,6 @@ class LxSyncManager @Inject constructor(
         return info
     }
 
-    /** 已存 key 免密授权 */
     private fun keyAuth(u: UrlInfo, info: LxClientKeyInfo) {
         val msg = LxSyncProtocol.aesEncrypt(AUTH_MSG + DEVICE_NAME, info.key)
         val (text, status) = httpGet(
@@ -197,67 +202,100 @@ class LxSyncManager @Inject constructor(
 
     // ─── RPC handlers ───
 
-    private fun buildFuncs(): Map<String, suspend (List<String>) -> String> = mapOf(
+    /**
+     * 把 Msg2Call 传进来的参数（第 0 位是 socket 槽位 null）解成 JSON 字符串。
+     * 关键：服务端下发的参数可能是对象/字符串/number，统一用 JsonElement 承接后
+     * 再 toString，避免 `.trim('"')` 这类粗暴处理破坏对象结构。
+     */
+    private fun arg(el: JsonElement?): String? = when (el) {
+        null, JsonNull -> null
+        is JsonPrimitive -> el.content
+        else -> el.toString()
+    }
+
+    private fun buildFuncs(): Map<String, suspend (List<JsonElement>) -> JsonElement> = mapOf(
         "getEnabledFeatures" to { _ ->
-            """{"list":{"skipSnapshot":false},"dislike":{"skipSnapshot":false}}"""
+            // 对齐 lx：仅当版本一致才启用对应模块（我们用固定版本，向下兼容任意 serverType）
+            lxJson.parseToJsonElement(
+                """{"list":{"skipSnapshot":false},"dislike":{"skipSnapshot":false}}""",
+            )
         },
         "finished" to {
-            updateStatus(connected = true, connecting = false, message = "同步成功")
-            moduleReady["list"] = true
-            moduleReady["dislike"] = true
-            "null"
+            val count = dataBridge.countSongs()
+            updateStatus(
+                connected = true,
+                connecting = false,
+                message = "同步成功",
+                lastSyncAt = System.currentTimeMillis(),
+                syncedCount = count,
+            )
+            JsonNull
         },
         "list_sync_get_md5" to {
-            "\"" + LxSyncProtocol.md5(lxJson.encodeToString(dataBridge.getLocalListData())) + "\""
+            JsonPrimitive(LxSyncProtocol.md5(lxJson.encodeToString(dataBridge.getLocalListData())))
         },
-        "list_sync_get_sync_mode" to { "\"" + currentMode.wire + "\"" },
-        "list_sync_get_list_data" to { lxJson.encodeToString(dataBridge.getLocalListData()) },
+        "list_sync_get_sync_mode" to { JsonPrimitive(currentMode.wire) },
+        "list_sync_get_list_data" to { lxJson.encodeToJsonElement(dataBridge.getLocalListData()) },
         "list_sync_set_list_data" to { args ->
-            val raw = args.getOrNull(1)?.trim()?.trim('"')
-            if (!raw.isNullOrBlank()) {
-                val data = lxJson.decodeFromString<LxListData>(raw)
-                dataBridge.setLocalListData(data)
+            val dataEl = args.getOrNull(1)
+            if (dataEl != null && dataEl !is JsonNull) {
+                try {
+                    val data = lxJson.decodeFromJsonElement<LxListData>(dataEl)
+                    dataBridge.setLocalListData(data)
+                    val count = dataBridge.countSongs()
+                    updateStatus(message = "已接收云端歌单", syncedCount = count)
+                } catch (e: Exception) {
+                    updateStatus(message = "写入歌单失败: ${e.message}")
+                    throw e
+                }
             }
-            "null"
+            JsonNull
         },
         "list_sync_finished" to {
             moduleReady["list"] = true
-            "null"
+            JsonNull
         },
         "onListSyncAction" to { args ->
-            // args[0] 是注入的 socket 槽位(null)，args[1] 是 action json
-            val raw = args.getOrNull(1)?.trim()?.trim('"')
-            if (moduleReady["list"] == true && !raw.isNullOrBlank()) {
-                runCatching {
-                    val action = lxJson.decodeFromString<LxListAction>(raw!!)
-                    if (action.action == "list_data_overwrite" && !action.data.isNullOrBlank()) {
-                        dataBridge.setLocalListData(lxJson.decodeFromString(action.data))
+            // args[0] = socket 槽位(null)，args[1] = action 对象
+            val raw = args.getOrNull(1)
+            if (moduleReady["list"] == true && raw != null && raw !is JsonNull) {
+                try {
+                    val action = lxJson.decodeFromJsonElement<LxListAction>(raw)
+                    if (action.action == "list_data_overwrite" && action.data != null) {
+                        val data = lxJson.decodeFromJsonElement<LxListData>(action.data!!)
+                        dataBridge.setLocalListData(data)
+                        updateStatus(message = "已接收云端歌单", syncedCount = dataBridge.countSongs())
                     }
+                } catch (e: Exception) {
+                    updateStatus(message = "处理歌单动作失败: ${e.message}")
+                    throw e
                 }
             }
-            "null"
+            JsonNull
         },
         // dislike：Android 无对应 UI，仅协议层收发（以字符串规则保存）
-        "dislike_sync_get_md5" to { "\"" + LxSyncProtocol.md5(getDislikeRules().trim()) + "\"" },
-        "dislike_sync_get_sync_mode" to { "\"merge_local_remote\"" },
-        "dislike_sync_get_list_data" to { "\"" + getDislikeRules() + "\"" },
+        "dislike_sync_get_md5" to { JsonPrimitive(LxSyncProtocol.md5(getDislikeRules().trim())) },
+        "dislike_sync_get_sync_mode" to { JsonPrimitive("merge_local_remote") },
+        "dislike_sync_get_list_data" to { JsonPrimitive(getDislikeRules()) },
         "dislike_sync_set_list_data" to { args ->
-            setDislikeRules(args.getOrNull(1)?.trim()?.trim('"') ?: "")
-            "null"
+            setDislikeRules(arg(args.getOrNull(1)) ?: "")
+            JsonNull
         },
         "dislike_sync_finished" to {
             moduleReady["dislike"] = true
-            "null"
+            JsonNull
         },
         "onDislikeSyncAction" to { args ->
-            val raw = args.getOrNull(1)?.trim()?.trim('"')
-            if (!raw.isNullOrBlank()) {
+            val raw = args.getOrNull(1)
+            if (raw != null && raw !is JsonNull) {
                 runCatching {
-                    val action = lxJson.decodeFromString<LxListAction>(raw!!)
-                    if (action.action == "dislike_data_overwrite") setDislikeRules(action.data ?: "")
+                    val action = lxJson.decodeFromJsonElement<LxListAction>(raw)
+                    if (action.action == "dislike_data_overwrite" && action.data != null) {
+                        setDislikeRules(arg(action.data) ?: "")
+                    }
                 }
             }
-            "null"
+            JsonNull
         },
     )
 
@@ -276,8 +314,7 @@ class LxSyncManager @Inject constructor(
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 connectTimeout?.cancel()
-                updateStatus(connected = true, connecting = false, message = "已连接")
-                // 初始化 RPC
+                updateStatus(connecting = false, message = "已连接，等待同步...")
                 rpc = Msg2Call(
                     funcs = buildFuncs(),
                     sendMessage = { json -> webSocket.send(LxSyncProtocol.encodeData(json)) },
@@ -290,6 +327,8 @@ class LxSyncManager @Inject constructor(
                     runCatching {
                         val plain = LxSyncProtocol.decodeData(text)
                         rpc?.onMessage(plain)
+                    }.onFailure { e ->
+                        updateStatus(message = "消息处理失败: ${e.message}")
                     }
                 }
             }
@@ -319,7 +358,7 @@ class LxSyncManager @Inject constructor(
         connectTimeout = java.util.Timer().also { timer ->
             timer.schedule(object : java.util.TimerTask() {
                 override fun run() {
-                    if (_status.value.connected.not() && _status.value.connecting) {
+                    if (_status.value.connecting) {
                         updateStatus(connected = false, connecting = false, message = "连接超时")
                         disconnect()
                     }
@@ -328,15 +367,14 @@ class LxSyncManager @Inject constructor(
         }
     }
 
-    private fun encode(s: String): String =
-        java.net.URLEncoder.encode(s, "UTF-8")
+    private fun encode(s: String): String = java.net.URLEncoder.encode(s, "UTF-8")
 
     // ─── 公共 API ───
 
     fun connect(serverUrl: String, authCode: String? = null, mode: LxSyncMode = currentMode) {
         if (_status.value.connecting) return
         currentMode = mode
-        updateStatus(connecting = true, message = "连接中...")
+        updateStatus(connected = false, connecting = true, message = "连接中...")
         scope.launch {
             try {
                 val u = parseUrl(serverUrl)
@@ -385,7 +423,7 @@ class LxSyncManager @Inject constructor(
         socket?.close(1000, null)
         socket = null
         cleanup()
-        updateStatus(connected = false, connecting = false, serverId = null, serverName = null)
+        updateStatus(connected = false, connecting = false, serverId = null, serverName = null, message = "")
     }
 
     private fun cleanup() {
@@ -401,10 +439,10 @@ class LxSyncManager @Inject constructor(
         serverId: String? = _status.value.serverId,
         serverName: String? = _status.value.serverName,
         lastSyncAt: Long? = _status.value.lastSyncAt,
+        syncedCount: Int = _status.value.syncedCount,
     ) {
-        _status.value = LxSyncStatus(connected, connecting, message, serverName, serverId, lastSyncAt)
+        _status.value = LxSyncStatus(connected, connecting, message, serverName, serverId, lastSyncAt, syncedCount)
     }
 
-    /** 供 UI 显示当前歌曲数 */
     suspend fun localSongCount(): Int = dataBridge.countSongs()
 }
