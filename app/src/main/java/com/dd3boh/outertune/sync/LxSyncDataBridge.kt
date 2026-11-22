@@ -70,33 +70,59 @@ class LxSyncDataBridge @Inject constructor(
         val existingPlaylistIds = data.userList.map { list ->
             list.id to database.playlist(list.id).first()
         }
+        // insert() 用 IGNORE：歌曲已存在时 block 不会执行，liked 标记会丢失。
+        // 预先读出已存在的歌曲，事务内对它们显式 update。
+        val existingSongsById = data.loveList.associate { lx ->
+            val metadata = lx.toMediaMetadata()
+            metadata.id to database.song(metadata.id).first()?.song
+        }
 
         database.transaction {
             // 1. loveList：先把现有 liked 清空，再标记新的
             currentlyLiked.forEach { database.update(it) }
             data.loveList.forEach { lx ->
                 val metadata = lx.toMediaMetadata()
+                // 新歌：insert 带 block 写入 liked 并补齐艺术家/专辑关联
                 database.insert(metadata) { entity ->
                     entity.copy(liked = true, likedDate = LocalDateTime.now())
+                }
+                // 已存在的歌：上面 insert 被 IGNORE，block 不执行，需显式补一次 liked
+                existingSongsById[metadata.id]?.let { existing ->
+                    database.update(existing.copy(liked = true, likedDate = LocalDateTime.now()))
                 }
             }
 
             // 2. userList：重建歌单歌曲映射
             for (remoteList in data.userList) {
-                val existing = existingPlaylistIds.firstOrNull { it.first == remoteList.id }?.second
-                val playlistId = if (existing == null) {
-                    val newId = PlaylistEntity.generatePlaylistId()
-                    database.insert(
-                        PlaylistEntity(
-                            id = newId,
-                            name = remoteList.name,
-                            isEditable = true,
-                            isLocal = false,
-                        ),
+                // 系统歌单不参与同步，避免覆盖「喜欢的音乐」「下载」
+                if (remoteList.id in SYSTEM_PLAYLISTS) continue
+
+                val existingPlaylist =
+                    existingPlaylistIds.firstOrNull { it.first == remoteList.id }?.second?.playlist
+                val playlistId = if (existingPlaylist == null) {
+                    // 关键：Anhe 歌单列表只显示 bookmarkedAt != null 或 isLocal = 1 的歌单。
+                    // 之前两者都没设，导致数据写入 Room 但界面永远看不到（表现为「已同步却无歌单」）。
+                    // 用远端 id 作为主键，保证多次同步能稳定匹配同一歌单。
+                    val newEntity = PlaylistEntity(
+                        id = remoteList.id.ifBlank { PlaylistEntity.generatePlaylistId() },
+                        name = remoteList.name,
+                        isEditable = true,
+                        isLocal = true,
+                        bookmarkedAt = LocalDateTime.now(),
                     )
-                    newId
+                    database.insert(newEntity)
+                    newEntity.id
                 } else {
-                    existing.playlist.id
+                    // 已存在但不可见的歌单（老版本同步遗留）同样修正可见性
+                    if (!existingPlaylist.isLocal && existingPlaylist.bookmarkedAt == null) {
+                        database.update(
+                            existingPlaylist.copy(
+                                isLocal = true,
+                                bookmarkedAt = LocalDateTime.now(),
+                            ),
+                        )
+                    }
+                    existingPlaylist.id
                 }
 
                 database.clearPlaylist(playlistId)
