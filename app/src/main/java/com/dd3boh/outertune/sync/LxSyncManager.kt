@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -34,6 +35,7 @@ data class LxSyncStatus(
     val serverId: String? = null,
     val lastSyncAt: Long? = null,
     val syncedCount: Int = 0,
+    val diag: String = "",
 )
 
 /** 同步模式（对齐 lx 的 6 种 + cancel） */
@@ -100,6 +102,18 @@ class LxSyncManager @Inject constructor(
 
     private val _status = MutableStateFlow(LxSyncStatus())
     val status: StateFlow<LxSyncStatus> = _status
+
+    // 诊断日志：记录同步每一步的真实数据，直接显示在设置页，便于定位"假同步"
+    private val diagLines = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private fun diag(s: String) {
+        diagLines.add(s)
+        while (diagLines.size > 40) diagLines.poll()
+        _status.value = _status.value.copy(diag = diagLines.joinToString("\n"))
+    }
+    private fun clearDiag() {
+        diagLines.clear()
+        _status.value = _status.value.copy(diag = "")
+    }
 
     private var socket: WebSocket? = null
     private var rpc: Msg2Call? = null
@@ -214,7 +228,8 @@ class LxSyncManager @Inject constructor(
     }
 
     private fun buildFuncs(): Map<String, suspend (List<JsonElement>) -> JsonElement> = mapOf(
-        "getEnabledFeatures" to { _ ->
+        "getEnabledFeatures" to { args ->
+            diag("→ getEnabledFeatures(server=${arg(args.getOrNull(1))}, feats=${arg(args.getOrNull(2))})")
             // 对齐 lx：仅当版本一致才启用对应模块（我们用固定版本，向下兼容任意 serverType）
             lxJson.parseToJsonElement(
                 """{"list":{"skipSnapshot":false},"dislike":{"skipSnapshot":false}}""",
@@ -222,6 +237,7 @@ class LxSyncManager @Inject constructor(
         },
         "finished" to {
             val count = dataBridge.countSongs()
+            diag("← finished (流程结束, 本地歌曲=$count)")
             updateStatus(
                 connected = true,
                 connecting = false,
@@ -232,41 +248,59 @@ class LxSyncManager @Inject constructor(
             JsonNull
         },
         "list_sync_get_md5" to {
-            JsonPrimitive(LxSyncProtocol.md5(lxJson.encodeToString(dataBridge.getLocalListData())))
+            val d = dataBridge.getLocalListData()
+            val md5 = LxSyncProtocol.md5(lxJson.encodeToString(d))
+            diag("→ get_md5(localLove=${d.loveList.size}, localSet=${d.userList.size}, md5=$md5)")
+            JsonPrimitive(md5)
         },
         "list_sync_get_sync_mode" to { JsonPrimitive(currentMode.wire) },
-        "list_sync_get_list_data" to { lxJson.parseToJsonElement(lxJson.encodeToString(dataBridge.getLocalListData())) },
+        "list_sync_get_list_data" to {
+            val d = dataBridge.getLocalListData()
+            diag("→ get_list_data(上报 localLove=${d.loveList.size}, localSet=${d.userList.size})")
+            lxJson.parseToJsonElement(lxJson.encodeToString(d))
+        },
         "list_sync_set_list_data" to { args ->
             val dataEl = args.getOrNull(1)
+            diag("← set_list_data 到达 (hasData=${dataEl != null && dataEl !is JsonNull})")
             if (dataEl != null && dataEl !is JsonNull) {
                 try {
                     val data = lxJson.decodeFromString<LxListData>(dataEl.toString())
+                    diag("  解析结果: love=${data.loveList.size}, 歌单=${data.userList.size}, 歌单歌曲=${data.userList.sumOf { it.list.size }}")
                     dataBridge.setLocalListData(data)
                     val count = dataBridge.countSongs()
+                    diag("  写入完成: 本地现有歌曲=$count")
                     updateStatus(message = "已接收云端歌单", syncedCount = count)
                 } catch (e: Exception) {
+                    diag("  ✗ 写入失败: ${e.javaClass.simpleName}: ${e.message}")
                     updateStatus(message = "写入歌单失败: ${e.message}")
                     throw e
                 }
+            } else {
+                diag("  ✗ 服务端下发了空数据")
             }
             JsonNull
         },
         "list_sync_finished" to {
             moduleReady["list"] = true
+            diag("← list_sync_finished (模块就绪)")
             JsonNull
         },
         "onListSyncAction" to { args ->
             // args[0] = socket 槽位(null)，args[1] = action 对象
             val raw = args.getOrNull(1)
+            diag("← onListSyncAction (ready=${moduleReady["list"] == true}, hasData=${raw != null && raw !is JsonNull})")
             if (moduleReady["list"] == true && raw != null && raw !is JsonNull) {
                 try {
                     val action = lxJson.decodeFromString<LxListAction>(raw.toString())
+                    diag("  action=${action.action}")
                     if (action.action == "list_data_overwrite" && action.data != null) {
                         val data = lxJson.decodeFromString<LxListData>(action.data!!.toString())
+                        diag("  解析结果: love=${data.loveList.size}, 歌单=${data.userList.size}")
                         dataBridge.setLocalListData(data)
                         updateStatus(message = "已接收云端歌单", syncedCount = dataBridge.countSongs())
                     }
                 } catch (e: Exception) {
+                    diag("  ✗ 动作处理失败: ${e.javaClass.simpleName}: ${e.message}")
                     updateStatus(message = "处理歌单动作失败: ${e.message}")
                     throw e
                 }
@@ -326,8 +360,16 @@ class LxSyncManager @Inject constructor(
                 scope.launch {
                     runCatching {
                         val plain = LxSyncProtocol.decodeData(text)
+                        // 记录服务端调用的方法名（path 的最后一段）
+                        runCatching {
+                            val obj = lxJson.parseToJsonElement(plain) as? JsonObject
+                            val path = obj?.get("path") as? JsonArray
+                            val method = (path?.lastOrNull() as? JsonPrimitive)?.content
+                            if (method != null) diag("← RPC 调用: $method")
+                        }
                         rpc?.onMessage(plain)
                     }.onFailure { e ->
+                        diag("✗ 消息处理失败: ${e.message}")
                         updateStatus(message = "消息处理失败: ${e.message}")
                     }
                 }
@@ -374,6 +416,8 @@ class LxSyncManager @Inject constructor(
     fun connect(serverUrl: String, authCode: String? = null, mode: LxSyncMode = currentMode) {
         if (_status.value.connecting) return
         currentMode = mode
+        clearDiag()
+        diag("开始连接 $serverUrl (模式=${mode.wire})")
         updateStatus(connected = false, connecting = true, message = "连接中...")
         scope.launch {
             try {
