@@ -25,7 +25,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.menuAnchor
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
@@ -121,7 +120,7 @@ fun LxSyncSettings(
                 readOnly = true,
                 label = { Text("同步模式") },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(modeExpanded) },
-                modifier = Modifier.fillMaxWidth().menuAnchor(),
+                modifier = Modifier.fillMaxWidth(),
             )
             ExposedDropdownMenu(
                 expanded = modeExpanded,
