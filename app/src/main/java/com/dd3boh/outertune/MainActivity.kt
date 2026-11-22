@@ -176,6 +176,7 @@ import com.dd3boh.outertune.ui.screens.settings.LibrariesScreen
 import com.dd3boh.outertune.ui.screens.settings.LocalFoldersSettings
 import com.dd3boh.outertune.ui.screens.settings.LogSettingsScreen
 import com.dd3boh.outertune.ui.screens.settings.LxSourceSettings
+import com.dd3boh.outertune.ui.screens.settings.LxSyncSettings
 import com.dd3boh.outertune.ui.screens.settings.RadioSettingsScreen
 import com.dd3boh.outertune.ui.screens.settings.SettingsScreen
 import com.dd3boh.outertune.ui.screens.settings.StorageSettings
@@ -203,6 +204,9 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var downloadUtil: DownloadUtil
+
+    @Inject
+    lateinit var lxSyncManager: com.dd3boh.outertune.sync.LxSyncManager
 
     lateinit var connectivityObserver: NetworkConnectivityObserver
 
@@ -301,6 +305,9 @@ class MainActivity : ComponentActivity() {
             playerConnection = PlayerConnection(controllerViewModel, database)
         }
         WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // 洛雪云同步：若用户在设置中开启，启动后自动重连
+        lxSyncManager.autoConnect()
 
         setContent {
             Log.v(MAIN_TAG, "RC-1")
@@ -757,6 +764,9 @@ class MainActivity : ComponentActivity() {
                                     }
                                     composable("settings/lx_source") {
                                         LxSourceSettings(navController, scrollBehavior)
+                                    }
+                                    composable("settings/lx_sync") {
+                                        LxSyncSettings(navController, scrollBehavior)
                                     }
                                     composable("settings/radio") {
                                         RadioSettingsScreen(navController, scrollBehavior)
