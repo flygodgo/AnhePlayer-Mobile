@@ -47,7 +47,7 @@ class LxSyncDataBridge @Inject constructor(
             if (p.id in SYSTEM_PLAYLISTS || !p.isEditable) continue
             val songs = database.playlistSongs(p.id).first()
             val items = songs.mapNotNull { ps ->
-                val song = database.song(ps.songId).first()?.song ?: return@mapNotNull null
+                val song = database.song(ps.map.songId).first()?.song ?: return@mapNotNull null
                 song.toLxMusicInfo()
             }
             userList.add(
@@ -127,7 +127,7 @@ class LxSyncDataBridge @Inject constructor(
             sourceData?.let { raw ->
                 try {
                     return lxJson.decodeFromString<LxMusicInfo>(raw)
-                } catch {
+                } catch (_: Exception) {
                     /* 损坏则按字段重建 */
                 }
             }
